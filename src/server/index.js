@@ -348,37 +348,6 @@ const finalizeTournament = async (tournamentId) => {
   });
 };
 
-const canFinalizeTournament = async (tournamentId) => {
-  const teams = await buildTeams(tournamentId);
-  const matches = await buildMatches(tournamentId, teams);
-
-  if (!matches.length) {
-    return { allowed: true };
-  }
-
-  const unresolvedMatches = matches.filter((match) =>
-    ["queued", "live"].includes(match.status),
-  );
-
-  if (unresolvedMatches.length) {
-    return {
-      allowed: false,
-      error: "Complete all queued and live matches before finalizing the tournament.",
-    };
-  }
-
-  const finalMatch = matches.find((match) => match.table_number === 3);
-
-  if (finalMatch && finalMatch.status !== "completed") {
-    return {
-      allowed: false,
-      error: "The final match must be completed before finalizing the tournament.",
-    };
-  }
-
-  return { allowed: true };
-};
-
 const getPendingWinnersForTable = (matches, tableNumber) => {
   const tableMatches = matches
     .filter((match) => match.table_number === tableNumber)
@@ -1093,12 +1062,6 @@ app.post(
       )
     ) {
       response.status(400).json({ error: "There is no active tournament to finalize." });
-      return;
-    }
-
-    const finalizeCheck = await canFinalizeTournament(tournament.id);
-    if (!finalizeCheck.allowed) {
-      response.status(400).json({ error: finalizeCheck.error });
       return;
     }
 

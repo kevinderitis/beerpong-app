@@ -4,7 +4,6 @@ import { io } from "socket.io-client";
 const socket = io("/", { autoConnect: true });
 const ADMIN_TRIGGER_NAME = "AdminArenaBeerPong8768";
 const HISTORY_PAGE_SIZE = 2;
-const NOTIFICATION_PROMPT_STORAGE_KEY = "beerpong-notification-prompted";
 
 const detectInstallPlatform = () => {
   const userAgent = navigator.userAgent || "";
@@ -177,22 +176,6 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!auth || !notificationSupported) {
-      return;
-    }
-
-    if (notificationPermission === "granted") {
-      localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "done");
-      return;
-    }
-
-    const alreadyPrompted = localStorage.getItem(NOTIFICATION_PROMPT_STORAGE_KEY) === "done";
-    if (!alreadyPrompted) {
-      setNotificationPromptOpen(true);
-    }
-  }, [auth, notificationPermission, notificationSupported]);
-
   const isAdmin = auth?.role === "admin";
   const isCashier = auth?.role === "cashier";
   const publicRegistrationDone =
@@ -332,6 +315,9 @@ function App() {
         dateKey: state?.tournament?.date_key || null,
       });
       setFeedback(result.message);
+      if (notificationSupported && notificationPermission !== "granted") {
+        setNotificationPromptOpen(true);
+      }
     } catch (error) {
       setFeedback(error.message);
     } finally {
@@ -555,7 +541,6 @@ function App() {
         body: { subscription },
       });
 
-      localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "done");
       setNotificationPromptOpen(false);
       setFeedback("Push notifications are enabled.");
     } catch (error) {
@@ -566,7 +551,6 @@ function App() {
   };
 
   const dismissNotificationPrompt = () => {
-    localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "done");
     setNotificationPromptOpen(false);
   };
 
