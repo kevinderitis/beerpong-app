@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: beerpong-app
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: APP_TIMEZONE
+        value: America/Argentina/Buenos_Aires

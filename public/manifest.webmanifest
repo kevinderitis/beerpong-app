@@ -1,0 +1,17 @@
+{
+  "name": "Beer Pong Night",
+  "short_name": "BeerPong",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09131f",
+  "theme_color": "#09131f",
+  "description": "Beer pong tournament registration, draw and live table management.",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
