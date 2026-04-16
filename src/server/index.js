@@ -149,6 +149,17 @@ const getLatestTournamentForDay = async (dateKey) =>
     ),
   );
 
+const getLatestTournamentForDayByStatuses = async (dateKey, statuses) =>
+  serialize(
+    await collections.tournaments.findOne(
+      {
+        date_key: { $regex: `^${dateKey}` },
+        status: { $in: statuses },
+      },
+      { sort: { created_at: -1 } },
+    ),
+  );
+
 const setTournamentLifecycle = async (
   tournamentId,
   {
@@ -224,6 +235,22 @@ const ensureTournamentForToday = async (reference = now()) => {
   }
 
   return tournament;
+};
+
+const getCurrentTournamentForToday = async (reference = now()) => {
+  const { dateKey } = getDateMeta(reference);
+  const activeTournament = await getLatestTournamentForDayByStatuses(dateKey, [
+    "registration_open",
+    "countdown",
+    "draw_revealing",
+    "live_matches",
+  ]);
+
+  if (activeTournament) {
+    return activeTournament;
+  }
+
+  return ensureTournamentForToday(reference);
 };
 
 const listRegistrationsByTournament = async (tournamentId) =>
@@ -447,7 +474,7 @@ const ensureFinalMatchForTournament = async (tournamentId) => {
 };
 
 const getTournamentState = async () => {
-  const tournament = await ensureTournamentForToday();
+  const tournament = await getCurrentTournamentForToday();
   const registrations = await listRegistrationsByTournament(tournament.id);
   const teams = await buildTeams(tournament.id);
   const matches = await buildMatches(tournament.id, teams);
@@ -725,7 +752,7 @@ const startRevealSequence = async (tournamentId) => {
 };
 
 const syncLifecycle = async () => {
-  const tournament = await ensureTournamentForToday();
+  const tournament = await getCurrentTournamentForToday();
 
   if (
     tournament.status === "countdown" &&
@@ -1054,7 +1081,7 @@ app.post(
   "/api/admin/finalize-tournament",
   authenticate(["admin"]),
   async (_request, response) => {
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
 
     if (
       !["registration_open", "countdown", "draw_revealing", "live_matches"].includes(
@@ -1080,7 +1107,7 @@ app.post(
   "/api/admin/close-registration",
   authenticate(["admin"]),
   async (_request, response) => {
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
 
     if (tournament.status !== "registration_open") {
       response.status(400).json({ error: "Registration is not currently open." });
@@ -1195,7 +1222,7 @@ app.post(
   "/api/admin/start-draw-now",
   authenticate(["admin"]),
   async (_request, response) => {
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
 
     if (!["countdown", "registration_closed"].includes(tournament.status)) {
       response.status(400).json({ error: "Draw cannot be started right now." });
@@ -1216,7 +1243,7 @@ app.post(
   "/api/admin/tables/:tableNumber/start-next",
   authenticate(["admin"]),
   async (request, response) => {
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
     const tableNumber = Number(request.params.tableNumber);
     const tableMatches = (await buildMatches(tournament.id, await buildTeams(tournament.id))).filter(
       (match) => match.table_number === tableNumber,
@@ -1260,7 +1287,7 @@ app.post(
   authenticate(["cashier", "admin"]),
   async (request, response) => {
     const registrationId = request.params.registrationId;
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
     const registration = serialize(
       await collections.registrations.findOne({ _id: getObjectId(registrationId) }),
     );
