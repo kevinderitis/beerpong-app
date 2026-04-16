@@ -4,6 +4,7 @@ import { io } from "socket.io-client";
 const socket = io("/", { autoConnect: true });
 const ADMIN_TRIGGER_NAME = "AdminArenaBeerPong8768";
 const HISTORY_PAGE_SIZE = 2;
+const NOTIFICATION_PROMPT_STORAGE_KEY = "beerpong-notification-prompted";
 
 const detectInstallPlatform = () => {
   const userAgent = navigator.userAgent || "";
@@ -18,6 +19,10 @@ const detectInstallPlatform = () => {
 
   return "desktop";
 };
+
+const detectInstalledApp = () =>
+  window.matchMedia?.("(display-mode: standalone)")?.matches ||
+  window.navigator.standalone === true;
 
 const urlBase64ToUint8Array = (base64String) => {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -104,8 +109,10 @@ function App() {
   const [historyPage, setHistoryPage] = useState(1);
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
   const [installPlatform, setInstallPlatform] = useState("desktop");
+  const [isInstalledApp, setIsInstalledApp] = useState(false);
   const [notificationSupported, setNotificationSupported] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState("default");
+  const [notificationPromptOpen, setNotificationPromptOpen] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [busy, setBusy] = useState("");
   const [expandedQueues, setExpandedQueues] = useState({});
@@ -149,6 +156,7 @@ function App() {
 
   useEffect(() => {
     setInstallPlatform(detectInstallPlatform());
+    setIsInstalledApp(detectInstalledApp());
     setNotificationSupported(
       "serviceWorker" in navigator &&
         "PushManager" in window &&
@@ -157,7 +165,33 @@ function App() {
     if ("Notification" in window) {
       setNotificationPermission(Notification.permission);
     }
+
+    const mediaQuery = window.matchMedia?.("(display-mode: standalone)");
+    const syncInstalledState = () => setIsInstalledApp(detectInstalledApp());
+    window.addEventListener("appinstalled", syncInstalledState);
+    mediaQuery?.addEventListener?.("change", syncInstalledState);
+
+    return () => {
+      window.removeEventListener("appinstalled", syncInstalledState);
+      mediaQuery?.removeEventListener?.("change", syncInstalledState);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!auth || !notificationSupported) {
+      return;
+    }
+
+    if (notificationPermission === "granted") {
+      localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "done");
+      return;
+    }
+
+    const alreadyPrompted = localStorage.getItem(NOTIFICATION_PROMPT_STORAGE_KEY) === "done";
+    if (!alreadyPrompted) {
+      setNotificationPromptOpen(true);
+    }
+  }, [auth, notificationPermission, notificationSupported]);
 
   const isAdmin = auth?.role === "admin";
   const isCashier = auth?.role === "cashier";
@@ -521,12 +555,19 @@ function App() {
         body: { subscription },
       });
 
+      localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "done");
+      setNotificationPromptOpen(false);
       setFeedback("Push notifications are enabled.");
     } catch (error) {
       setFeedback(error.message || "Could not enable notifications.");
     } finally {
       setBusy("");
     }
+  };
+
+  const dismissNotificationPrompt = () => {
+    localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "done");
+    setNotificationPromptOpen(false);
   };
 
   const renderHistoryPanel = () => (
@@ -778,6 +819,43 @@ function App() {
         </div>
       )}
 
+      {notificationPromptOpen && (
+        <div className="modal-backdrop" onClick={dismissNotificationPrompt}>
+          <div className="modal-card confirm-card" onClick={(event) => event.stopPropagation()}>
+            <div className="section-head">
+              <div>
+                <p className="kicker">Notifications</p>
+                <h2>Stay updated live</h2>
+              </div>
+            </div>
+
+            <p className="feedback confirm-copy">
+              Allow notifications so the app can alert you about registration,
+              draw updates and live matches.
+            </p>
+
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={dismissNotificationPrompt}
+              >
+                Not now
+              </button>
+              <button
+                type="button"
+                onClick={enableNotifications}
+                disabled={busy === "notifications"}
+              >
+                {busy === "notifications"
+                  ? "Enabling..."
+                  : "Allow notifications"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="page">
         {activeScreen === "public" &&
           (!publicRegistrationDone ? (
@@ -818,27 +896,29 @@ function App() {
 
               <p className="feedback">{feedback}</p>
 
-              <div className="welcome-utility-actions">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => setInstallHelpOpen(true)}
-                >
-                  How to install the app
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={enableNotifications}
-                  disabled={busy === "notifications"}
-                >
-                  {busy === "notifications"
-                    ? "Enabling notifications..."
-                    : notificationPermission === "granted"
-                      ? "Notifications enabled"
-                      : "Enable notifications"}
-                </button>
-              </div>
+              {!isInstalledApp && (
+                <div className="welcome-utility-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setInstallHelpOpen(true)}
+                  >
+                    How to install the app
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={enableNotifications}
+                    disabled={busy === "notifications"}
+                  >
+                    {busy === "notifications"
+                      ? "Enabling notifications..."
+                      : notificationPermission === "granted"
+                        ? "Notifications enabled"
+                        : "Enable notifications"}
+                  </button>
+                </div>
+              )}
             </section>
           ) : (
             <section className="public-card">
