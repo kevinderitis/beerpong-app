@@ -119,13 +119,13 @@ function App() {
     const saved = localStorage.getItem("beerpong-public-registration");
 
     if (!saved) {
-      return { registered: false, dateKey: null };
+      return { registered: false, dateKey: null, name: "" };
     }
 
     try {
       return JSON.parse(saved);
     } catch {
-      return { registered: false, dateKey: null };
+      return { registered: false, dateKey: null, name: "" };
     }
   });
   const [auth, setAuth] = useState(() => {
@@ -313,6 +313,7 @@ function App() {
       setPublicRegistrationState({
         registered: true,
         dateKey: state?.tournament?.date_key || null,
+        name: trimmedName,
       });
       setFeedback(result.message);
       if (notificationSupported && notificationPermission !== "granted") {
@@ -538,7 +539,11 @@ function App() {
 
       await api("/api/push/subscribe", {
         method: "POST",
-        body: { subscription },
+        body: {
+          subscription,
+          playerName: publicRegistrationState?.name || "",
+          tournamentDateKey: publicRegistrationState?.dateKey || "",
+        },
       });
 
       setNotificationPromptOpen(false);

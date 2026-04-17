@@ -129,6 +129,7 @@ const ensureIndexes = async () => {
     collections.staffUsers.createIndex({ normalized_name: 1 }, { unique: true }),
     collections.staffUsers.createIndex({ username: 1 }, { unique: true }),
     collections.pushSubscriptions.createIndex({ endpoint: 1 }, { unique: true }),
+    collections.pushSubscriptions.createIndex({ tournament_date_key: 1, normalized_name: 1 }),
   ]);
 };
 
@@ -224,6 +225,20 @@ const createTournamentRecord = async (
   );
 
   return getTournamentById(String(result.insertedId));
+};
+
+const resetTournamentData = async (tournamentId) => {
+  await Promise.all([
+    collections.registrations.deleteMany({ tournament_id: tournamentId }),
+    collections.teamMembers.deleteMany({ tournament_id: tournamentId }),
+    collections.teams.deleteMany({ tournament_id: tournamentId }),
+    collections.matches.deleteMany({ tournament_id: tournamentId }),
+    collections.drawProgress.updateOne(
+      { tournament_id: tournamentId },
+      { $set: { tournament_id: tournamentId, reveal_count: 0 } },
+      { upsert: true },
+    ),
+  ]);
 };
 
 const ensureTournamentForToday = async (reference = now()) => {
@@ -473,6 +488,13 @@ const ensureFinalMatchForTournament = async (tournamentId) => {
   return serialize(await collections.matches.findOne({ _id: result.insertedId }));
 };
 
+const getTeamMemberNames = (team) => team?.members || [];
+
+const getOtherTableChampion = (matches, currentTableNumber) => {
+  const otherTableNumber = currentTableNumber === 1 ? 2 : 1;
+  return getTableChampionTeamId(matches, otherTableNumber);
+};
+
 const getTournamentState = async () => {
   const tournament = await getCurrentTournamentForToday();
   const registrations = await listRegistrationsByTournament(tournament.id);
@@ -673,12 +695,12 @@ const emitTournamentState = async () => {
   io.emit("tournament:state", await getTournamentState());
 };
 
-const sendPushNotification = async (title, body, data = {}) => {
+const sendPushNotification = async (title, body, data = {}, query = {}) => {
   if (!WEB_PUSH_ENABLED) {
     return;
   }
 
-  const subscriptions = (await collections.pushSubscriptions.find({}).toArray()).map(serialize);
+  const subscriptions = (await collections.pushSubscriptions.find(query).toArray()).map(serialize);
 
   await Promise.all(
     subscriptions.map(async (subscriptionRow) => {
@@ -699,6 +721,35 @@ const sendPushNotification = async (title, body, data = {}) => {
       }
     }),
   );
+};
+
+const sendPushToTournamentPlayers = async (
+  tournamentDateKey,
+  title,
+  body,
+  data = {},
+) =>
+  sendPushNotification(title, body, data, {
+    tournament_date_key: tournamentDateKey,
+  });
+
+const sendPushToPlayers = async (
+  tournamentDateKey,
+  playerNames,
+  title,
+  body,
+  data = {},
+) => {
+  const normalizedNames = [...new Set(playerNames.map(normalizeName))];
+
+  if (!normalizedNames.length) {
+    return;
+  }
+
+  await sendPushNotification(title, body, data, {
+    tournament_date_key: tournamentDateKey,
+    normalized_name: { $in: normalizedNames },
+  });
 };
 
 const stopRevealTimer = (tournamentId) => {
@@ -854,6 +905,8 @@ app.post("/api/push/subscribe", async (request, response) => {
   }
 
   const subscription = request.body?.subscription;
+  const playerName = String(request.body?.playerName || "").trim();
+  const tournamentDateKey = String(request.body?.tournamentDateKey || "").trim();
   if (!subscription?.endpoint) {
     response.status(400).json({ error: "Invalid push subscription." });
     return;
@@ -867,6 +920,9 @@ app.post("/api/push/subscribe", async (request, response) => {
         endpoint: subscription.endpoint,
         subscription_json: subscription,
         user_agent: String(request.headers["user-agent"] || ""),
+        player_name: playerName || null,
+        normalized_name: playerName ? normalizeName(playerName) : null,
+        tournament_date_key: tournamentDateKey || null,
         updated_at: timestamp,
       },
       $setOnInsert: { created_at: timestamp },
@@ -1054,6 +1110,7 @@ app.post(
   authenticate(["admin"]),
   async (_request, response) => {
     const tournament = await ensureTournamentForToday();
+    const { opensAt, closesAt } = getDateMeta();
 
     if (
       ["registration_open", "countdown", "draw_revealing", "live_matches"].includes(
@@ -1066,7 +1123,15 @@ app.post(
       return;
     }
 
-    await createTournamentRecord("registration_open");
+    await resetTournamentData(tournament.id);
+    await setTournamentLifecycle(tournament.id, {
+      status: "registration_open",
+      registrationOpensAt: opensAt.toISOString(),
+      registrationClosesAt: closesAt.toISOString(),
+      drawBeginsAt: null,
+      drawStartedAt: null,
+      drawCompletedAt: null,
+    });
     await emitTournamentState();
     void sendPushNotification(
       "Beer Pong Tournament",
@@ -1094,11 +1159,6 @@ app.post(
 
     await finalizeTournament(tournament.id);
     await emitTournamentState();
-    void sendPushNotification(
-      "Tournament completed",
-      "The tournament has ended. Open the app to see the winners.",
-      { url: "/" },
-    );
     response.json({ message: "Tournament finalized." });
   },
 );
@@ -1121,11 +1181,6 @@ app.post(
       drawBeginsAt,
     });
     await emitTournamentState();
-    void sendPushNotification(
-      "Registration closed",
-      "Team draw is about to begin.",
-      { url: "/" },
-    );
     response.json({ message: "Registration closed. Draw countdown started." });
   },
 );
@@ -1232,9 +1287,12 @@ app.post(
     const fresh = await createDrawForTournament(tournament.id);
     await startRevealSequence(fresh.id);
     await emitTournamentState();
-    void sendPushNotification("Draw started", "Teams are being revealed right now.", {
-      url: "/",
-    });
+    void sendPushToTournamentPlayers(
+      tournament.date_key,
+      "Draw started",
+      "Teams are being revealed right now.",
+      { url: "/" },
+    );
     response.json({ message: "Draw started." });
   },
 );
@@ -1270,14 +1328,50 @@ app.post(
       { _id: getObjectId(nextMatch.id) },
       { $set: { status: "live" } },
     );
-    await emitTournamentState();
-    void sendPushNotification(
-      tableNumber === 3 ? "Final started" : `Table ${tableNumber} started`,
-      tableNumber === 3
-        ? "The final match is now live."
-        : `A new match has started on table ${tableNumber}.`,
-      { url: "/" },
+
+    const teams = await buildTeams(tournament.id);
+    const matches = await buildMatches(tournament.id, teams);
+    const startedMatch = matches.find((match) => match.id === nextMatch.id);
+    const refreshedTableMatches = matches
+      .filter((match) => match.table_number === tableNumber)
+      .sort((left, right) => left.queue_index - right.queue_index);
+    const followingMatch = refreshedTableMatches.find(
+      (match) => match.queue_index > startedMatch.queue_index && match.status === "queued",
     );
+    const otherTableChampion = getOtherTableChampion(matches, tableNumber);
+    const isLastMatchBeforeFinal =
+      [1, 2].includes(tableNumber) &&
+      !followingMatch &&
+      Boolean(otherTableChampion);
+
+    await emitTournamentState();
+
+    if (followingMatch) {
+      void sendPushToPlayers(
+        tournament.date_key,
+        [
+          ...getTeamMemberNames(followingMatch.teamA),
+          ...getTeamMemberNames(followingMatch.teamB),
+        ],
+        "You're up next",
+        `The previous match on table ${tableNumber} has started. Get ready for your game.`,
+        { url: "/" },
+      );
+    }
+
+    if (isLastMatchBeforeFinal) {
+      void sendPushToPlayers(
+        tournament.date_key,
+        [
+          ...getTeamMemberNames(startedMatch.teamA),
+          ...getTeamMemberNames(startedMatch.teamB),
+        ],
+        "Last match before the final",
+        `Your match on table ${tableNumber} decides who reaches the final.`,
+        { url: "/" },
+      );
+    }
+
     response.json({ message: `Table ${tableNumber} match started.` });
   },
 );
@@ -1317,6 +1411,7 @@ app.post(
   async (request, response) => {
     const matchId = request.params.matchId;
     const winnerTeamId = String(request.body?.winnerTeamId || "");
+    const tournament = await getCurrentTournamentForToday();
     const match = serialize(
       await collections.matches.findOne({ _id: getObjectId(matchId) }),
     );
@@ -1349,7 +1444,29 @@ app.post(
 
     if ([1, 2].includes(match.table_number)) {
       await maybeQueueFollowupMatchesForTable(match.tournament_id, match.table_number);
+      const teams = await buildTeams(match.tournament_id);
+      const enrichedMatches = await buildMatches(match.tournament_id, teams);
+      const completedMatch = enrichedMatches.find((entry) => entry.id === match.id);
+      const championTeamId = getTableChampionTeamId(
+        enrichedMatches,
+        match.table_number,
+      );
+
       await ensureFinalMatchForTournament(match.tournament_id);
+
+      if (
+        championTeamId &&
+        completedMatch?.winner &&
+        completedMatch.winner.id === championTeamId
+      ) {
+        void sendPushToPlayers(
+          tournament.date_key,
+          getTeamMemberNames(completedMatch.winner),
+          "You're in the final",
+          "Your team advanced to the final. Get ready for the championship match.",
+          { url: "/" },
+        );
+      }
     }
 
     await emitTournamentState();
