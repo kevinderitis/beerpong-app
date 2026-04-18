@@ -166,6 +166,16 @@ const getLatestTournamentForDayByStatuses = async (dateKey, statuses) =>
     ),
   );
 
+const getActiveTournamentForToday = async (reference = now()) => {
+  const { dateKey } = getDateMeta(reference);
+  return getLatestTournamentForDayByStatuses(dateKey, [
+    "registration_open",
+    "countdown",
+    "draw_revealing",
+    "live_matches",
+  ]);
+};
+
 const setTournamentLifecycle = async (
   tournamentId,
   {
@@ -329,12 +339,7 @@ const ensureTournamentForToday = async (reference = now()) => {
 
 const getTournamentForReadToday = async (reference = now()) => {
   const { dateKey, opensAt, closesAt } = getDateMeta(reference);
-  const activeTournament = await getLatestTournamentForDayByStatuses(dateKey, [
-    "registration_open",
-    "countdown",
-    "draw_revealing",
-    "live_matches",
-  ]);
+  const activeTournament = await getActiveTournamentForToday(reference);
 
   if (activeTournament) {
     return activeTournament;
@@ -362,12 +367,7 @@ const getTournamentForReadToday = async (reference = now()) => {
 
 const getCurrentTournamentForToday = async (reference = now()) => {
   const { dateKey } = getDateMeta(reference);
-  const activeTournament = await getLatestTournamentForDayByStatuses(dateKey, [
-    "registration_open",
-    "countdown",
-    "draw_revealing",
-    "live_matches",
-  ]);
+  const activeTournament = await getActiveTournamentForToday(reference);
 
   if (activeTournament) {
     return activeTournament;
@@ -1299,26 +1299,17 @@ app.post(
   "/api/admin/open-registration",
   authenticate(["admin"]),
   async (_request, response) => {
-    let tournament = await getTournamentForReadToday();
+    const activeTournament = await getActiveTournamentForToday();
     const { opensAt, closesAt } = getDateMeta();
 
-    if (
-      tournament.id &&
-      ["registration_open", "countdown", "draw_revealing", "live_matches"].includes(
-        tournament.status,
-      )
-    ) {
+    if (activeTournament?.id) {
       response.status(400).json({
         error: "There is already a tournament in progress. Finalize it first.",
       });
       return;
     }
 
-    if (!tournament.id) {
-      tournament = await createTournamentRecord("registration_closed");
-    }
-
-    await resetTournamentData(tournament.id);
+    const tournament = await createTournamentRecord("registration_closed");
     await setTournamentLifecycle(tournament.id, {
       status: "registration_open",
       registrationOpensAt: opensAt.toISOString(),
