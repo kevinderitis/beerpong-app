@@ -178,29 +178,84 @@ const setTournamentLifecycle = async (
   },
 ) => {
   const current = await getTournamentById(tournamentId);
+  const requestedStatus = status ?? current?.status ?? null;
+  const caller = new Error().stack
+    ?.split("\n")
+    .slice(2, 5)
+    .map((line) => line.trim())
+    .join(" | ");
+
   logServer("setTournamentLifecycle:before", {
     tournamentId,
     currentStatus: current?.status || null,
-    requestedStatus: status ?? current?.status ?? null,
+    requestedStatus,
+    pid: process.pid,
+    caller,
   });
+
+  if (!current) {
+    logServer("setTournamentLifecycle:skip-missing", {
+      tournamentId,
+      requestedStatus,
+      pid: process.pid,
+      caller,
+    });
+    return null;
+  }
+
+  if (
+    current.status === "completed" &&
+    ["registration_open", "countdown", "draw_revealing", "live_matches"].includes(
+      requestedStatus,
+    )
+  ) {
+    logServer("setTournamentLifecycle:skip-completed-lock", {
+      tournamentId,
+      currentStatus: current.status,
+      requestedStatus,
+      pid: process.pid,
+      caller,
+    });
+    return current;
+  }
+
+  const nextValues = {
+    status: requestedStatus,
+    registration_opens_at: registrationOpensAt ?? current.registration_opens_at,
+    registration_closes_at:
+      registrationClosesAt ?? current.registration_closes_at,
+    draw_begins_at:
+      drawBeginsAt === undefined ? current.draw_begins_at : drawBeginsAt,
+    draw_started_at:
+      drawStartedAt === undefined ? current.draw_started_at : drawStartedAt,
+    draw_completed_at:
+      drawCompletedAt === undefined ? current.draw_completed_at : drawCompletedAt,
+  };
+
+  const isRedundantUpdate =
+    current.status === nextValues.status &&
+    current.registration_opens_at === nextValues.registration_opens_at &&
+    current.registration_closes_at === nextValues.registration_closes_at &&
+    current.draw_begins_at === nextValues.draw_begins_at &&
+    current.draw_started_at === nextValues.draw_started_at &&
+    current.draw_completed_at === nextValues.draw_completed_at;
+
+  if (isRedundantUpdate) {
+    logServer("setTournamentLifecycle:skip-redundant", {
+      tournamentId,
+      currentStatus: current.status,
+      requestedStatus,
+      pid: process.pid,
+      caller,
+    });
+    return current;
+  }
 
   const result = await collections.tournaments.updateOne(
     { _id: getObjectId(tournamentId) },
     {
       $set: {
-        status: status ?? current.status,
-        registration_opens_at:
-          registrationOpensAt ?? current.registration_opens_at,
-        registration_closes_at:
-          registrationClosesAt ?? current.registration_closes_at,
-        draw_begins_at:
-          drawBeginsAt === undefined ? current.draw_begins_at : drawBeginsAt,
-        draw_started_at:
-          drawStartedAt === undefined ? current.draw_started_at : drawStartedAt,
-        draw_completed_at:
-          drawCompletedAt === undefined
-            ? current.draw_completed_at
-            : drawCompletedAt,
+        ...nextValues,
         updated_at: now().toISOString(),
       },
     },
@@ -212,6 +267,8 @@ const setTournamentLifecycle = async (
     matchedCount: result.matchedCount,
     modifiedCount: result.modifiedCount,
     updatedStatus: updatedTournament?.status || null,
+    pid: process.pid,
+    caller,
   });
 
   return updatedTournament;
