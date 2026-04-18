@@ -59,6 +59,7 @@ let database;
 let collections;
 
 const revealTimers = new Map();
+const revealStartsInFlight = new Set();
 
 const now = () => dayjs().tz(APP_TIMEZONE);
 
@@ -815,45 +816,88 @@ const stopRevealTimer = (tournamentId) => {
 };
 
 const startRevealSequence = async (tournamentId) => {
-  stopRevealTimer(tournamentId);
-  const tournamentState = await getTournamentState();
-  const totalTeams = tournamentState.admin.teams.length;
-
-  if (!totalTeams) {
-    await setTournamentLifecycle(tournamentId, {
-      status: "live_matches",
-      drawCompletedAt: now().toISOString(),
-    });
-    await emitTournamentState();
+  if (revealStartsInFlight.has(tournamentId)) {
+    logServer("startRevealSequence:skip-in-flight", { tournamentId });
     return;
   }
 
-  const timer = setInterval(() => {
-    void (async () => {
-      const progress =
-        serialize(
-          await collections.drawProgress.findOne({ tournament_id: tournamentId }),
-        ) || { reveal_count: 0 };
-      const nextCount = progress.reveal_count + 1;
-      await collections.drawProgress.updateOne(
-        { tournament_id: tournamentId },
-        { $set: { tournament_id: tournamentId, reveal_count: nextCount } },
-        { upsert: true },
-      );
+  revealStartsInFlight.add(tournamentId);
+  stopRevealTimer(tournamentId);
+  try {
+    const tournament = await getTournamentById(tournamentId);
 
-      if (nextCount >= totalTeams) {
-        stopRevealTimer(tournamentId);
+    if (!tournament || tournament.status !== "draw_revealing") {
+      logServer("startRevealSequence:aborted", {
+        tournamentId,
+        status: tournament?.status || null,
+      });
+      return;
+    }
+
+    const teams = await buildTeams(tournamentId);
+    const totalTeams = teams.length;
+
+    if (!totalTeams) {
+      const freshTournament = await getTournamentById(tournamentId);
+      if (freshTournament?.status === "draw_revealing") {
         await setTournamentLifecycle(tournamentId, {
           status: "live_matches",
           drawCompletedAt: now().toISOString(),
         });
       }
-
       await emitTournamentState();
-    })().catch(console.error);
-  }, DRAW_REVEAL_INTERVAL_MS);
+      return;
+    }
 
-  revealTimers.set(tournamentId, timer);
+    const timer = setInterval(() => {
+      void (async () => {
+        const freshTournament = await getTournamentById(tournamentId);
+
+        if (!freshTournament || freshTournament.status !== "draw_revealing") {
+          logServer("startRevealSequence:stop-non-draw-status", {
+            tournamentId,
+            status: freshTournament?.status || null,
+          });
+          stopRevealTimer(tournamentId);
+          return;
+        }
+
+        const progress =
+          serialize(
+            await collections.drawProgress.findOne({ tournament_id: tournamentId }),
+          ) || { reveal_count: 0 };
+        const nextCount = progress.reveal_count + 1;
+        await collections.drawProgress.updateOne(
+          { tournament_id: tournamentId },
+          { $set: { tournament_id: tournamentId, reveal_count: nextCount } },
+          { upsert: true },
+        );
+
+        if (nextCount >= totalTeams) {
+          stopRevealTimer(tournamentId);
+
+          const finalTournament = await getTournamentById(tournamentId);
+          if (finalTournament?.status === "draw_revealing") {
+            await setTournamentLifecycle(tournamentId, {
+              status: "live_matches",
+              drawCompletedAt: now().toISOString(),
+            });
+          } else {
+            logServer("startRevealSequence:skip-live-transition", {
+              tournamentId,
+              status: finalTournament?.status || null,
+            });
+          }
+        }
+
+        await emitTournamentState();
+      })().catch(console.error);
+    }, DRAW_REVEAL_INTERVAL_MS);
+
+    revealTimers.set(tournamentId, timer);
+  } finally {
+    revealStartsInFlight.delete(tournamentId);
+  }
 };
 
 const syncLifecycle = async () => {
