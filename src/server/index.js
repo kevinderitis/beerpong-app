@@ -62,6 +62,10 @@ const revealTimers = new Map();
 
 const now = () => dayjs().tz(APP_TIMEZONE);
 
+const logServer = (scope, details) => {
+  console.log(`[BeerPong][${scope}]`, details);
+};
+
 const serialize = (document) => {
   if (!document) {
     return null;
@@ -173,8 +177,13 @@ const setTournamentLifecycle = async (
   },
 ) => {
   const current = await getTournamentById(tournamentId);
+  logServer("setTournamentLifecycle:before", {
+    tournamentId,
+    currentStatus: current?.status || null,
+    requestedStatus: status ?? current?.status ?? null,
+  });
 
-  await collections.tournaments.updateOne(
+  const result = await collections.tournaments.updateOne(
     { _id: getObjectId(tournamentId) },
     {
       $set: {
@@ -196,7 +205,15 @@ const setTournamentLifecycle = async (
     },
   );
 
-  return getTournamentById(tournamentId);
+  const updatedTournament = await getTournamentById(tournamentId);
+  logServer("setTournamentLifecycle:after", {
+    tournamentId,
+    matchedCount: result.matchedCount,
+    modifiedCount: result.modifiedCount,
+    updatedStatus: updatedTournament?.status || null,
+  });
+
+  return updatedTournament;
 };
 
 const createTournamentRecord = async (
@@ -252,6 +269,39 @@ const ensureTournamentForToday = async (reference = now()) => {
   return tournament;
 };
 
+const getTournamentForReadToday = async (reference = now()) => {
+  const { dateKey, opensAt, closesAt } = getDateMeta(reference);
+  const activeTournament = await getLatestTournamentForDayByStatuses(dateKey, [
+    "registration_open",
+    "countdown",
+    "draw_revealing",
+    "live_matches",
+  ]);
+
+  if (activeTournament) {
+    return activeTournament;
+  }
+
+  const latestTournament = await getLatestTournamentForDay(dateKey);
+
+  if (latestTournament) {
+    return latestTournament;
+  }
+
+  return {
+    id: null,
+    date_key: dateKey,
+    status: "registration_closed",
+    registration_opens_at: opensAt.toISOString(),
+    registration_closes_at: closesAt.toISOString(),
+    draw_begins_at: null,
+    draw_started_at: null,
+    draw_completed_at: null,
+    created_at: reference.toISOString(),
+    updated_at: reference.toISOString(),
+  };
+};
+
 const getCurrentTournamentForToday = async (reference = now()) => {
   const { dateKey } = getDateMeta(reference);
   const activeTournament = await getLatestTournamentForDayByStatuses(dateKey, [
@@ -265,7 +315,7 @@ const getCurrentTournamentForToday = async (reference = now()) => {
     return activeTournament;
   }
 
-  return ensureTournamentForToday(reference);
+  return getLatestTournamentForDay(dateKey);
 };
 
 const listRegistrationsByTournament = async (tournamentId) =>
@@ -496,14 +546,18 @@ const getOtherTableChampion = (matches, currentTableNumber) => {
 };
 
 const getTournamentState = async () => {
-  const tournament = await getCurrentTournamentForToday();
-  const registrations = await listRegistrationsByTournament(tournament.id);
-  const teams = await buildTeams(tournament.id);
-  const matches = await buildMatches(tournament.id, teams);
+  const tournament = await getTournamentForReadToday();
+  const registrations = tournament.id
+    ? await listRegistrationsByTournament(tournament.id)
+    : [];
+  const teams = tournament.id ? await buildTeams(tournament.id) : [];
+  const matches = tournament.id ? await buildMatches(tournament.id, teams) : [];
   const drawProgress =
-    serialize(
-      await collections.drawProgress.findOne({ tournament_id: tournament.id }),
-    ) || { reveal_count: 0 };
+    tournament.id
+      ? serialize(
+          await collections.drawProgress.findOne({ tournament_id: tournament.id }),
+        ) || { reveal_count: 0 }
+      : { reveal_count: 0 };
 
   const paidPlayers = registrations.filter((entry) => entry.paid);
   const paidNonVolunteerPlayers = paidPlayers.filter(
@@ -805,6 +859,11 @@ const startRevealSequence = async (tournamentId) => {
 const syncLifecycle = async () => {
   const tournament = await getCurrentTournamentForToday();
 
+  if (!tournament?.id) {
+    await emitTournamentState();
+    return;
+  }
+
   if (
     tournament.status === "countdown" &&
     tournament.draw_begins_at &&
@@ -827,6 +886,36 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: "*" } });
 
 app.use(express.json());
+
+app.use((request, response, next) => {
+  if (!request.path.startsWith("/api")) {
+    next();
+    return;
+  }
+
+  const startedAt = Date.now();
+  const requestId = Math.random().toString(36).slice(2, 10);
+  request.requestId = requestId;
+
+  logServer("request:start", {
+    requestId,
+    method: request.method,
+    path: request.path,
+    body: request.method === "GET" ? null : request.body,
+  });
+
+  response.on("finish", () => {
+    logServer("request:end", {
+      requestId,
+      method: request.method,
+      path: request.path,
+      statusCode: response.statusCode,
+      durationMs: Date.now() - startedAt,
+    });
+  });
+
+  next();
+});
 
 const createToken = (user) =>
   jwt.sign(
@@ -981,10 +1070,10 @@ app.post("/api/access", async (request, response) => {
 });
 
 app.post("/api/register", async (request, response) => {
-  const tournament = await ensureTournamentForToday();
+  const tournament = await getCurrentTournamentForToday();
   const name = String(request.body?.name || "").trim();
 
-  if (tournament.status !== "registration_open") {
+  if (!tournament?.id || tournament.status !== "registration_open") {
     response.status(400).json({ error: "Registration is currently closed." });
     return;
   }
@@ -1109,10 +1198,11 @@ app.post(
   "/api/admin/open-registration",
   authenticate(["admin"]),
   async (_request, response) => {
-    const tournament = await ensureTournamentForToday();
+    let tournament = await getTournamentForReadToday();
     const { opensAt, closesAt } = getDateMeta();
 
     if (
+      tournament.id &&
       ["registration_open", "countdown", "draw_revealing", "live_matches"].includes(
         tournament.status,
       )
@@ -1121,6 +1211,10 @@ app.post(
         error: "There is already a tournament in progress. Finalize it first.",
       });
       return;
+    }
+
+    if (!tournament.id) {
+      tournament = await createTournamentRecord("registration_closed");
     }
 
     await resetTournamentData(tournament.id);
@@ -1147,8 +1241,15 @@ app.post(
   authenticate(["admin"]),
   async (_request, response) => {
     const tournament = await getCurrentTournamentForToday();
+    logServer("finalize-tournament:resolved", {
+      requestId: _request.requestId,
+      tournamentId: tournament?.id || null,
+      status: tournament?.status || null,
+      dateKey: tournament?.date_key || null,
+    });
 
     if (
+      !tournament?.id ||
       !["registration_open", "countdown", "draw_revealing", "live_matches"].includes(
         tournament.status,
       )
@@ -1157,9 +1258,29 @@ app.post(
       return;
     }
 
-    await finalizeTournament(tournament.id);
+    const before = await getTournamentById(tournament.id);
+    const finalizedTournament = await finalizeTournament(tournament.id);
+    const after = await getTournamentById(tournament.id);
+
+    logServer("finalize-tournament:completed", {
+      requestId: _request.requestId,
+      tournamentId: tournament.id,
+      previousStatus: before?.status || null,
+      returnedStatus: finalizedTournament?.status || null,
+      persistedStatus: after?.status || null,
+    });
+
     await emitTournamentState();
-    response.json({ message: "Tournament finalized." });
+    response.json({
+      message: "Tournament finalized.",
+      debug: {
+        requestId: _request.requestId,
+        tournamentId: tournament.id,
+        previousStatus: before?.status || null,
+        updatedStatus: after?.status || null,
+        dateKey: after?.date_key || null,
+      },
+    });
   },
 );
 
@@ -1169,7 +1290,7 @@ app.post(
   async (_request, response) => {
     const tournament = await getCurrentTournamentForToday();
 
-    if (tournament.status !== "registration_open") {
+    if (!tournament?.id || tournament.status !== "registration_open") {
       response.status(400).json({ error: "Registration is not currently open." });
       return;
     }
@@ -1189,9 +1310,9 @@ app.post(
   "/api/admin/simulate-registration",
   authenticate(["admin"]),
   async (_request, response) => {
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
 
-    if (tournament.status !== "registration_open") {
+    if (!tournament?.id || tournament.status !== "registration_open") {
       response.status(400).json({ error: "Open registration before simulating players." });
       return;
     }
@@ -1229,10 +1350,10 @@ app.post(
   "/api/admin/add-volunteer",
   authenticate(["admin"]),
   async (request, response) => {
-    const tournament = await ensureTournamentForToday();
+    const tournament = await getCurrentTournamentForToday();
     const name = String(request.body?.name || "").trim();
 
-    if (tournament.status !== "registration_open") {
+    if (!tournament?.id || tournament.status !== "registration_open") {
       response.status(400).json({
         error: "Volunteers can only be added while registration is open.",
       });
@@ -1279,7 +1400,7 @@ app.post(
   async (_request, response) => {
     const tournament = await getCurrentTournamentForToday();
 
-    if (!["countdown", "registration_closed"].includes(tournament.status)) {
+    if (!tournament?.id || !["countdown", "registration_closed"].includes(tournament.status)) {
       response.status(400).json({ error: "Draw cannot be started right now." });
       return;
     }
@@ -1303,6 +1424,12 @@ app.post(
   async (request, response) => {
     const tournament = await getCurrentTournamentForToday();
     const tableNumber = Number(request.params.tableNumber);
+
+    if (!tournament?.id) {
+      response.status(400).json({ error: "There is no active tournament." });
+      return;
+    }
+
     const tableMatches = (await buildMatches(tournament.id, await buildTeams(tournament.id))).filter(
       (match) => match.table_number === tableNumber,
     );
@@ -1382,6 +1509,12 @@ app.post(
   async (request, response) => {
     const registrationId = request.params.registrationId;
     const tournament = await getCurrentTournamentForToday();
+
+    if (!tournament?.id) {
+      response.status(400).json({ error: "There is no active tournament." });
+      return;
+    }
+
     const registration = serialize(
       await collections.registrations.findOne({ _id: getObjectId(registrationId) }),
     );
@@ -1412,6 +1545,12 @@ app.post(
     const matchId = request.params.matchId;
     const winnerTeamId = String(request.body?.winnerTeamId || "");
     const tournament = await getCurrentTournamentForToday();
+
+    if (!tournament?.id) {
+      response.status(400).json({ error: "There is no active tournament." });
+      return;
+    }
+
     const match = serialize(
       await collections.matches.findOne({ _id: getObjectId(matchId) }),
     );

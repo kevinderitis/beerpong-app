@@ -32,6 +32,15 @@ const urlBase64ToUint8Array = (base64String) => {
 };
 
 const api = async (path, options = {}) => {
+  const startedAt = new Date().toISOString();
+  console.log("[API request]", {
+    path,
+    method: options.method || "GET",
+    body: options.body || null,
+    hasToken: Boolean(options.token),
+    startedAt,
+  });
+
   const response = await fetch(path, {
     headers: {
       "Content-Type": "application/json",
@@ -44,9 +53,27 @@ const api = async (path, options = {}) => {
   });
 
   const payload = await response.json().catch(() => ({}));
+  console.log("[API response]", {
+    path,
+    method: options.method || "GET",
+    status: response.status,
+    ok: response.ok,
+    payload,
+  });
   if (!response.ok) {
     throw new Error(payload.error || "Something went wrong.");
   }
+
+  if (options.includeMeta) {
+    return {
+      payload,
+      meta: {
+        status: response.status,
+        ok: response.ok,
+      },
+    };
+  }
+
   return payload;
 };
 
@@ -113,6 +140,7 @@ function App() {
   const [notificationPermission, setNotificationPermission] = useState("default");
   const [notificationPromptOpen, setNotificationPromptOpen] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [debugLogs, setDebugLogs] = useState([]);
   const [busy, setBusy] = useState("");
   const [expandedQueues, setExpandedQueues] = useState({});
   const [publicRegistrationState, setPublicRegistrationState] = useState(() => {
@@ -276,6 +304,17 @@ function App() {
     setHistoryPanelOpen(!tournamentInProgress);
   }, [tournamentInProgress]);
 
+  const pushDebugLog = (entry) => {
+    setDebugLogs((current) => [
+      {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        timestamp: new Date().toISOString(),
+        ...entry,
+      },
+      ...current,
+    ].slice(0, 30));
+  };
+
   const submitRegistration = async (event) => {
     event.preventDefault();
     setBusy("register");
@@ -353,13 +392,34 @@ function App() {
   const runAdminAction = async (path, actionId) => {
     setBusy(actionId);
     setFeedback("");
+    pushDebugLog({
+      type: "request",
+      label: actionId,
+      path,
+      method: "POST",
+      requestBody: null,
+    });
     try {
       const result = await api(path, {
         method: "POST",
         token: auth.token,
+        includeMeta: true,
       });
-      setFeedback(result.message);
+      pushDebugLog({
+        type: "response",
+        label: actionId,
+        path,
+        status: result.meta.status,
+        responseBody: result.payload,
+      });
+      setFeedback(result.payload.message);
     } catch (error) {
+      pushDebugLog({
+        type: "error",
+        label: actionId,
+        path,
+        responseBody: { error: error.message },
+      });
       setFeedback(error.message);
     } finally {
       setBusy("");
@@ -369,12 +429,34 @@ function App() {
   const markPaid = async (registrationId) => {
     setBusy(`pay-${registrationId}`);
     setFeedback("");
+    const path = `/api/cashier/pay/${registrationId}`;
+    pushDebugLog({
+      type: "request",
+      label: "confirm-payment",
+      path,
+      method: "POST",
+      requestBody: null,
+    });
     try {
-      await api(`/api/cashier/pay/${registrationId}`, {
+      const result = await api(path, {
         method: "POST",
         token: auth.token,
+        includeMeta: true,
+      });
+      pushDebugLog({
+        type: "response",
+        label: "confirm-payment",
+        path,
+        status: result.meta.status,
+        responseBody: result.payload,
       });
     } catch (error) {
+      pushDebugLog({
+        type: "error",
+        label: "confirm-payment",
+        path,
+        responseBody: { error: error.message },
+      });
       setFeedback(error.message);
     } finally {
       setBusy("");
@@ -384,13 +466,36 @@ function App() {
   const finishMatch = async (matchId, winnerTeamId) => {
     setBusy(`match-${matchId}`);
     setFeedback("");
+    const path = `/api/admin/matches/${matchId}/complete`;
+    const requestBody = { winnerTeamId };
+    pushDebugLog({
+      type: "request",
+      label: "finish-match",
+      path,
+      method: "POST",
+      requestBody,
+    });
     try {
-      await api(`/api/admin/matches/${matchId}/complete`, {
+      const result = await api(path, {
         method: "POST",
         token: auth.token,
-        body: { winnerTeamId },
+        body: requestBody,
+        includeMeta: true,
+      });
+      pushDebugLog({
+        type: "response",
+        label: "finish-match",
+        path,
+        status: result.meta.status,
+        responseBody: result.payload,
       });
     } catch (error) {
+      pushDebugLog({
+        type: "error",
+        label: "finish-match",
+        path,
+        responseBody: { error: error.message },
+      });
       setFeedback(error.message);
     } finally {
       setBusy("");
@@ -400,12 +505,34 @@ function App() {
   const startNextMatch = async (tableNumber) => {
     setBusy(`start-${tableNumber}`);
     setFeedback("");
+    const path = `/api/admin/tables/${tableNumber}/start-next`;
+    pushDebugLog({
+      type: "request",
+      label: `start-table-${tableNumber}`,
+      path,
+      method: "POST",
+      requestBody: null,
+    });
     try {
-      await api(`/api/admin/tables/${tableNumber}/start-next`, {
+      const result = await api(path, {
         method: "POST",
         token: auth.token,
+        includeMeta: true,
+      });
+      pushDebugLog({
+        type: "response",
+        label: `start-table-${tableNumber}`,
+        path,
+        status: result.meta.status,
+        responseBody: result.payload,
       });
     } catch (error) {
+      pushDebugLog({
+        type: "error",
+        label: `start-table-${tableNumber}`,
+        path,
+        responseBody: { error: error.message },
+      });
       setFeedback(error.message);
     } finally {
       setBusy("");
@@ -692,6 +819,53 @@ function App() {
       ) : (
         <p className="muted-text">Tournament history is collapsed. Tap to expand it.</p>
       )}
+    </section>
+  );
+
+  const renderDebugPanel = () => (
+    <section className="panel">
+      <div className="section-head">
+        <div>
+          <p className="kicker">Debug</p>
+          <h2>Request and response logs</h2>
+        </div>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => setDebugLogs([])}
+        >
+          Clear logs
+        </button>
+      </div>
+
+      <div className="debug-log-list">
+        {debugLogs.length ? (
+          debugLogs.map((entry) => (
+            <article className="debug-log-card" key={entry.id}>
+              <div className="debug-log-head">
+                <strong>{entry.label}</strong>
+                <span>{formatTournamentStamp(entry.timestamp)}</span>
+              </div>
+              <p className="muted-text">
+                {entry.type.toUpperCase()} {entry.method || ""} {entry.path}
+                {entry.status ? ` • ${entry.status}` : ""}
+              </p>
+              {entry.requestBody ? (
+                <pre className="debug-log-body">
+                  {JSON.stringify(entry.requestBody, null, 2)}
+                </pre>
+              ) : null}
+              {entry.responseBody ? (
+                <pre className="debug-log-body">
+                  {JSON.stringify(entry.responseBody, null, 2)}
+                </pre>
+              ) : null}
+            </article>
+          ))
+        ) : (
+          <p className="muted-text">No debug entries yet.</p>
+        )}
+      </div>
     </section>
   );
 
@@ -1278,6 +1452,7 @@ function App() {
               )}
 
               {renderHistoryPanel()}
+              {renderDebugPanel()}
             </section>
           ) : (
           <section className="staff-layout">
@@ -1480,6 +1655,7 @@ function App() {
             )}
 
             {renderHistoryPanel()}
+            {renderDebugPanel()}
 
             {showAdminMatches && state.admin.finalMatch && (
               <section className="panel final-panel">

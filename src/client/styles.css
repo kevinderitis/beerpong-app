@@ -567,9 +567,38 @@ button:disabled {
 .staff-list,
 .queue-list,
 .draw-reveal-list,
-.history-list {
+.history-list,
+.debug-log-list {
   display: grid;
   gap: 0.85rem;
+}
+
+.debug-log-card {
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.debug-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.45rem;
+}
+
+.debug-log-body {
+  margin: 0.65rem 0 0;
+  padding: 0.85rem;
+  border-radius: 14px;
+  background: rgba(5, 10, 18, 0.72);
+  color: #cfe0f3;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .draw-match-card {
