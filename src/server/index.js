@@ -482,6 +482,28 @@ const createDrawForTournament = async (tournamentId) => {
     });
   }
 
+  if (teamIds.length % 2 === 1) {
+    const byeTeamId = teamIds[teamIds.length - 1];
+    const assignedMatchCount = Math.floor(teamIds.length / 2);
+    const tableNumber = assignedMatchCount % 2 === 0 ? 1 : 2;
+    const queueIndex = queue[tableNumber];
+
+    queue[tableNumber] += 1;
+
+    await collections.matches.insertOne({
+      tournament_id: tournamentId,
+      table_number: tableNumber,
+      queue_index: queueIndex,
+      team_a_id: byeTeamId,
+      team_b_id: null,
+      status: "completed",
+      winner_team_id: byeTeamId,
+      completed_at: now().toISOString(),
+      is_bye: true,
+      created_at: now().toISOString(),
+    });
+  }
+
   return setTournamentLifecycle(tournamentId, {
     status: "draw_revealing",
     drawStartedAt: now().toISOString(),
